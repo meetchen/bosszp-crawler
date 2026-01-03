@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Analytics Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2.1.0/dist/echarts-wordcloud.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            transition: all 0.2s;
+            border: 1px solid #e2e8f0;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            border-color: #cbd5e1;
+        }
+
+        .filter-select {
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 0.5rem center;
+            background-repeat: no-repeat;
+            background-size: 1.5em 1.5em;
+            padding-right: 2.5rem;
+        }
+
+        /* 标签样式 */
+        .skill-tag {
+            transition: all 0.2s;
+        }
+
+        .skill-tag:hover {
+            transform: scale(1.05);
+        }
+
+        .skill-tag.active {
+            background-color: #2563eb;
+            color: white;
+            border-color: #2563eb;
+        }
+    </style>
+</head>
+
+<body class="text-slate-800 p-4 max-w-[95%] mx-auto">
+
+    <header
+        class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4 bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+        <div>
+            <h1 class="text-2xl font-bold text-slate-900 flex items-center gap-3">
+                <span class="bg-indigo-600 text-white p-2 rounded-lg">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z">
+                        </path>
+                    </svg>
+                </span>
+                Job Analytics Dashboard
+            </h1>
+            <p class="text-slate-500 text-sm mt-1 ml-1">支持：点击标签筛选 · 多维钻取 · 详情直达</p>
+        </div>
+
+        <div class="flex items-center gap-4">
+            <div class="text-right hidden md:block">
+                <div id="file-name-display" class="font-medium text-sm text-slate-700">当前: 演示数据</div>
+                <div id="row-count-display" class="text-xs text-slate-400">144 条记录</div>
+            </div>
+            <div class="relative overflow-hidden inline-block">
+                <button
+                    class="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-5 rounded-lg transition flex items-center gap-2 text-sm shadow-md">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    导入数据 (CSV)
+                </button>
+                <input type="file" id="csv-upload" accept=".csv"
+                    class="absolute left-0 top-0 opacity-0 cursor-pointer w-full h-full" />
+            </div>
+        </div>
+    </header>
+
+    <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 sticky top-0 z-50">
+        <div class="flex flex-wrap items-center gap-4">
+            <div class="flex items-center gap-2 mr-2">
+                <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z">
+                    </path>
+                </svg>
+                <span class="text-sm font-bold text-slate-700">筛选条件:</span>
+            </div>
+
+            <select id="filter-company"
+                class="filter-select appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-32 p-2 hover:bg-slate-100 transition">
+                <option value="all">🏢 公司</option>
+            </select>
+
+            <select id="filter-city"
+                class="filter-select appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-32 p-2 hover:bg-slate-100 transition">
+                <option value="all">📍 城市</option>
+            </select>
+
+            <select id="filter-degree"
+                class="filter-select appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-32 p-2 hover:bg-slate-100 transition">
+                <option value="all">🎓 学历</option>
+            </select>
+
+            <select id="filter-exp"
+                class="filter-select appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-32 p-2 hover:bg-slate-100 transition">
+                <option value="all">💼 经验</option>
+            </select>
+
+            <div id="active-tag-filter"
+                class="hidden flex items-center bg-blue-50 border border-blue-200 text-blue-700 text-sm px-3 py-1.5 rounded-full">
+                <span class="font-semibold mr-2">标签:</span>
+                <span id="active-tag-name" class="font-bold">Rust</span>
+                <button onclick="clearTagFilter()" class="ml-2 hover:text-blue-900 focus:outline-none">
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd"
+                            d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                            clip-rule="evenodd"></path>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="ml-auto">
+                <button onclick="resetFilters()"
+                    class="text-sm text-slate-500 hover:text-red-500 font-medium py-2 px-3 flex items-center gap-1 transition">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16">
+                        </path>
+                    </svg>
+                    清空筛选
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div class="card bg-gradient-to-br from-indigo-50 to-white border-indigo-100">
+            <div class="text-slate-500 text-xs font-bold uppercase tracking-wider">筛选后平均月薪</div>
+            <div class="flex items-baseline gap-2 mt-1">
+                <span class="text-3xl font-bold text-slate-800" id="kpi-salary">-</span>
+                <span class="text-sm text-slate-500">K/月</span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="text-slate-500 text-xs font-bold uppercase tracking-wider">Top 1 热门技能</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1 truncate" id="kpi-skill">-</div>
+            <div class="text-xs text-slate-400 mt-1">出现频率最高</div>
+        </div>
+        <div class="card">
+            <div class="text-slate-500 text-xs font-bold uppercase tracking-wider">主要学历要求</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1" id="kpi-degree">-</div>
+            <div class="text-xs text-slate-400 mt-1">占比最大</div>
+        </div>
+        <div class="card">
+            <div class="text-slate-500 text-xs font-bold uppercase tracking-wider">筛选职位数</div>
+            <div class="text-2xl font-bold text-slate-800 mt-1" id="kpi-count">-</div>
+            <div class="text-xs text-green-600 mt-1">符合当前条件</div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        <div class="card lg:col-span-1 flex flex-col">
+            <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-indigo-500"></span> 技能词云 (点击筛选)
+            </h3>
+            <div id="chart-wordcloud" class="flex-grow min-h-[300px]"></div>
+        </div>
+        <div class="card lg:col-span-2 flex flex-col">
+            <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-blue-500"></span> 热门技能排行 (Top 15)
+            </h3>
+            <div id="chart-skills" class="flex-grow min-h-[300px]"></div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div class="card">
+            <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-purple-500"></span> 学历分布
+            </h3>
+            <div id="chart-degree" class="h-[300px]"></div>
+        </div>
+        <div class="card">
+            <h3 class="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-green-500"></span> 经验与薪资关系
+            </h3>
+            <div id="chart-exp" class="h-[300px]"></div>
+        </div>
+    </div>
+
+    <div class="card overflow-hidden">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-2">
+            <div>
+                <h3 class="font-bold text-slate-800 text-lg">📋 高薪职位精选</h3>
+                <p class="text-xs text-slate-400 mt-1">点击 <span
+                        class="bg-slate-100 px-1 rounded border border-slate-300">标签</span> 可快速筛选，点击职位名跳转详情</p>
+            </div>
+            <div class="text-xs bg-yellow-50 text-yellow-700 px-3 py-1 rounded border border-yellow-200">
+                默认显示薪资 Top 10
+            </div>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm text-slate-600">
+                <thead class="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
+                    <tr>
+                        <th class="p-4 w-1/5 rounded-tl-lg">职位名称</th>
+                        <th class="p-4 w-1/6">公司</th>
+                        <th class="p-4 w-1/12">薪资</th>
+                        <th class="p-4 w-1/12">经验</th>
+                        <th class="p-4 w-1/12">城市</th>
+                        <th class="p-4 w-2/5 rounded-tr-lg">
+                            <div class="flex items-center gap-1">
+                                核心标签 (可筛选)
+                                <svg class="w-3 h-3 text-slate-400" fill="none" viewBox="0 0 24 24"
+                                    stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
+                                </svg>
+                            </div>
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="jobs-table-body" class="divide-y divide-slate-100">
+                </tbody>
+            </table>
+
+            <div class="py-4 text-center border-t border-slate-50">
+                <div id="empty-state" class="hidden text-slate-400 py-4">未找到符合条件的职位</div>
+                <button id="btn-load-more" onclick="loadMoreJobs()"
+                    class="hidden bg-white border border-slate-300 text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium py-2 px-6 rounded-full shadow-sm transition text-sm">
+                    显示更多职位 👇
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 全局状态 ---
+        let globalRawData = [];
+        let currentFilteredData = [];
+        let displayLimit = 10;
+        let activeTagFilter = null; // 当前选中的标签
+        let charts = {};
+
+        // --- 初始化 ---
+        window.onload = () => {
+            initCharts();
+            globalRawData = defaultData; // 加载默认演示数据
+            initFilters(globalRawData);
+            applyFilters();
+        };
+
+        function initCharts() {
+            charts.wordcloud = echarts.init(document.getElementById('chart-wordcloud'));
+            charts.skills = echarts.init(document.getElementById('chart-skills'));
+            charts.degree = echarts.init(document.getElementById('chart-degree'));
+            charts.exp = echarts.init(document.getElementById('chart-exp'));
+            window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+
+            // WordCloud 点击事件
+            charts.wordcloud.on('click', function (params) {
+                setTagFilter(params.name);
+            });
+        }
+
+        // --- 核心逻辑 ---
+
+        // 1. 设置标签筛选 (全局入口)
+        window.setTagFilter = function (tagName) {
+            activeTagFilter = tagName;
+            // UI 反馈
+            document.getElementById('active-tag-filter').classList.remove('hidden');
+            document.getElementById('active-tag-name').textContent = tagName;
+            // 重新应用筛选
+            applyFilters();
+            // 滚动到顶部方便查看
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // 2. 清除标签筛选
+        window.clearTagFilter = function () {
+            activeTagFilter = null;
+            document.getElementById('active-tag-filter').classList.add('hidden');
+            applyFilters();
+        }
+
+        // 3. 应用所有筛选 (下拉框 + 标签)
+        function applyFilters() {
+            const cityVal = document.getElementById('filter-city').value;
+            const degreeVal = document.getElementById('filter-degree').value;
+            const expVal = document.getElementById('filter-exp').value;
+            const companyVal = document.getElementById('filter-company').value;
+
+            const filtered = globalRawData.filter(row => {
+                const comp = row.company || row.brand_name;
+                const matchCity = cityVal === 'all' || row.city_name === cityVal;
+                const matchDegree = degreeVal === 'all' || row.job_degree === degreeVal;
+                const matchExp = expVal === 'all' || row.job_experience === expVal;
+                const matchCompany = companyVal === 'all' || comp === companyVal;
+
+                // 标签筛选逻辑：模糊匹配
+                let matchTag = true;
+                if (activeTagFilter) {
+                    const skills = (row.skills || "").toLowerCase();
+                    matchTag = skills.includes(activeTagFilter.toLowerCase());
+                }
+
+                return matchCity && matchDegree && matchExp && matchCompany && matchTag;
+            });
+
+            processAndRender(filtered);
+        }
+
+        // 4. 数据处理与渲染
+        function processAndRender(data) {
+            currentFilteredData = data;
+            displayLimit = 10; // 重置显示数量
+
+            const stats = {
+                skills: {}, degree: {}, expSalary: {},
+                totalSalary: 0, validSalaryCount: 0, count: data.length
+            };
+
+            data.forEach(row => {
+                // 薪资
+                const avgSal = parseSalary(row.salary || row.salary_desc);
+                if (avgSal > 0) {
+                    stats.totalSalary += avgSal;
+                    stats.validSalaryCount++;
+                    row._parsedSalary = avgSal;
+                }
+
+                // 技能 (用于图表统计)
+                const skillStr = row.skills || "";
+                const skillList = skillStr.split(/[;,，\s]+/).filter(s => s.trim().length > 1);
+                skillList.forEach(s => {
+                    const k = s.trim(); // 保持大小写用于展示，统计时可统一
+                    stats.skills[k] = (stats.skills[k] || 0) + 1;
+                });
+
+                // 维度
+                const degree = row.job_degree || "未知";
+                stats.degree[degree] = (stats.degree[degree] || 0) + 1;
+                const exp = row.job_experience || "经验不限";
+                if (!stats.expSalary[exp]) stats.expSalary[exp] = [];
+                if (avgSal > 0) stats.expSalary[exp].push(avgSal);
+            });
+
+            updateCharts(stats);
+            renderTable();
+        }
+
+        // 5. 表格渲染 (含标签优化)
+        function renderTable() {
+            const tbody = document.getElementById('jobs-table-body');
+            const btnMore = document.getElementById('btn-load-more');
+            const emptyState = document.getElementById('empty-state');
+
+            tbody.innerHTML = '';
+
+            if (currentFilteredData.length === 0) {
+                emptyState.classList.remove('hidden');
+                btnMore.classList.add('hidden');
+                return;
+            }
+            emptyState.classList.add('hidden');
+
+            const sortedRows = [...currentFilteredData].sort((a, b) => (b._parsedSalary || 0) - (a._parsedSalary || 0));
+            const rowsToShow = sortedRows.slice(0, displayLimit);
+
+            rowsToShow.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50 transition border-b border-slate-50 group";
+
+                const name = row.job_name || row.title || "未知职位";
+                const company = row.company || row.brand_name || "-";
+                const salary = row.salary || row.salary_desc || "-";
+                const city = row.city_name || row.location || "-";
+                const exp = row.job_experience || "-";
+                const link = row.link || row.detail_url || null;
+
+                // 职位名链接
+                let nameHtml = `<span class="font-medium text-slate-800">${name}</span>`;
+                if (link && link.startsWith('http')) {
+                    nameHtml = `
+                        <a href="${link}" target="_blank" class="font-medium text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 group-hover:translate-x-1 transition-transform">
+                            ${name}
+                            <svg class="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                        </a>
+                    `;
+                }
+
+                // 标签生成逻辑
+                const rawSkills = row.skills || "";
+                const skillArray = rawSkills.split(/[;,，\s]+/).filter(s => s.trim().length > 0);
+
+                // 生成可点击的标签 HTML
+                let tagsHtml = skillArray.map(tag => {
+                    // 如果是当前选中的标签，高亮显示
+                    const isActive = activeTagFilter && tag.toLowerCase() === activeTagFilter.toLowerCase();
+                    const activeClass = isActive ? "bg-blue-600 text-white border-blue-600 shadow-sm" : "bg-slate-100 text-slate-600 border-slate-200 hover:bg-white hover:border-blue-300 hover:text-blue-600";
+
+                    return `<span onclick="setTagFilter('${tag}')" class="skill-tag inline-block text-xs px-2 py-0.5 rounded-full border mr-1 mb-1 cursor-pointer select-none ${activeClass}">${tag}</span>`;
+                }).join('');
+
+                tr.innerHTML = `
+                    <td class="p-4 align-top">${nameHtml}</td>
+                    <td class="p-4 align-top text-slate-600 font-medium">${company}</td>
+                    <td class="p-4 align-top text-emerald-600 font-bold font-mono">${salary}</td>
+                    <td class="p-4 align-top text-slate-500">${exp}</td>
+                    <td class="p-4 align-top text-slate-500">${city}</td>
+                    <td class="p-4 align-top">
+                        <div class="flex flex-wrap items-start content-start">
+                            ${tagsHtml}
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            if (currentFilteredData.length > displayLimit) {
+                btnMore.classList.remove('hidden');
+                btnMore.textContent = `显示更多 (${displayLimit}/${currentFilteredData.length}) 👇`;
+            } else {
+                btnMore.classList.add('hidden');
+            }
+        }
+
+        // --- 辅助函数 ---
+        function parseSalary(s) {
+            if (!s) return 0;
+            const match = s.toUpperCase().match(/(\d+)-(\d+)K/);
+            return match ? (parseInt(match[1]) + parseInt(match[2])) / 2 : 0;
+        }
+
+        function loadMoreJobs() {
+            displayLimit += 20;
+            renderTable();
+        }
+
+        function resetFilters() {
+            document.getElementById('filter-city').value = 'all';
+            document.getElementById('filter-degree').value = 'all';
+            document.getElementById('filter-exp').value = 'all';
+            document.getElementById('filter-company').value = 'all';
+            clearTagFilter();
+        }
+
+        function fillSelect(id, set) {
+            const select = document.getElementById(id);
+            const originalText = select.options[0].text;
+            select.innerHTML = `<option value="all">${originalText}</option>`;
+            Array.from(set).filter(x => x).sort().forEach(val => {
+                const opt = document.createElement('option');
+                opt.value = val;
+                opt.textContent = val;
+                select.appendChild(opt);
+            });
+        }
+
+        function initFilters(data) {
+            const cities = new Set(), degrees = new Set(), exps = new Set(), companies = new Set();
+            data.forEach(r => {
+                if (r.city_name) cities.add(r.city_name);
+                if (r.job_degree) degrees.add(r.job_degree);
+                if (r.job_experience) exps.add(r.job_experience);
+                const c = r.company || r.brand_name;
+                if (c) companies.add(c);
+            });
+            fillSelect('filter-city', cities);
+            fillSelect('filter-degree', degrees);
+            fillSelect('filter-exp', exps);
+            fillSelect('filter-company', companies);
+
+            // 绑定事件
+            ['filter-city', 'filter-degree', 'filter-exp', 'filter-company'].forEach(id => {
+                document.getElementById(id).addEventListener('change', applyFilters);
+            });
+        }
+
+        function updateCharts(stats) {
+            // KPI
+            const avgSal = stats.validSalaryCount > 0 ? (stats.totalSalary / stats.validSalaryCount).toFixed(1) : "-";
+            document.getElementById('kpi-salary').textContent = avgSal;
+            document.getElementById('kpi-count').textContent = stats.count;
+
+            const sortedSkills = Object.entries(stats.skills).sort((a, b) => b[1] - a[1]);
+            document.getElementById('kpi-skill').textContent = sortedSkills[0] ? sortedSkills[0][0] : "无";
+            const sortedDegree = Object.entries(stats.degree).sort((a, b) => b[1] - a[1]);
+            document.getElementById('kpi-degree').textContent = sortedDegree[0] ? sortedDegree[0][0] : "无";
+
+            // WordCloud
+            charts.wordcloud.setOption({
+                tooltip: { show: true },
+                series: [{
+                    type: 'wordCloud',
+                    shape: 'circle',
+                    sizeRange: [12, 50],
+                    rotationRange: [-45, 90],
+                    textStyle: {
+                        fontFamily: 'sans-serif',
+                        fontWeight: 'bold',
+                        color: () => `hsl(${Math.random() * 360}, 60%, 50%)`
+                    },
+                    data: sortedSkills.map(s => ({ name: s[0], value: s[1] }))
+                }]
+            });
+
+            // Skills Bar
+            const topSkills = sortedSkills.slice(0, 15);
+            charts.skills.setOption({
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                grid: { left: '3%', right: '5%', bottom: '3%', top: '3%', containLabel: true },
+                xAxis: { type: 'value' },
+                yAxis: { type: 'category', data: topSkills.map(s => s[0]), inverse: true },
+                series: [{
+                    type: 'bar',
+                    data: topSkills.map(s => s[1]),
+                    itemStyle: {
+                        color: (p) => {
+                            const n = p.name.toLowerCase();
+                            if (n === (activeTagFilter || '').toLowerCase()) return '#f59e0b'; // 高亮选中
+                            if (n.includes('rust')) return '#e11d48';
+                            if (n.includes('c++') || n.includes('cuda')) return '#2563eb';
+                            return '#94a3b8';
+                        },
+                        borderRadius: [0, 4, 4, 0]
+                    }
+                }]
+            });
+
+            // Degree & Exp Charts (Standard)
+            charts.degree.setOption({
+                tooltip: { trigger: 'item' },
+                series: [{
+                    type: 'pie',
+                    radius: ['40%', '65%'],
+                    data: Object.entries(stats.degree).map(([k, v]) => ({ name: k, value: v })),
+                    itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 }
+                }]
+            });
+
+            const expLabels = Object.keys(stats.expSalary);
+            const expValues = expLabels.map(k => {
+                const arr = stats.expSalary[k];
+                return (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1);
+            });
+            charts.exp.setOption({
+                tooltip: { trigger: 'axis' },
+                xAxis: { type: 'category', data: expLabels },
+                yAxis: { type: 'value' },
+                series: [{ type: 'bar', data: expValues, itemStyle: { color: '#10b981' } }]
+            });
+        }
+
+        // CSV Upload
+        document.getElementById('csv-upload').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            document.getElementById('file-name-display').textContent = file.name;
+            Papa.parse(file, {
+                header: true, skipEmptyLines: true,
+                complete: (res) => {
+                    globalRawData = res.data;
+                    document.getElementById('row-count-display').textContent = globalRawData.length + " 条";
+                    initFilters(globalRawData);
+                    // Reset tag filter on new file load
+                    clearTagFilter();
+                }
+            });
+        });
+
+        // Demo Data
+        const defaultData = [
+            { job_name: "AI Infra研发工程师", company: "讯盟科技", salary: "50-70K·16薪", skills: "cuda;GPU算子优化;HPC", job_degree: "本科", job_experience: "3-5年", city_name: "杭州", link: "https://www.zhipin.com/job_detail/xxx" },
+            { job_name: "大模型推理系统工程师", company: "阿里云", salary: "45-75K·16薪", skills: "推理引擎开发;ai工程;C++", job_degree: "硕士", job_experience: "3-5年", city_name: "杭州", link: "https://www.zhipin.com/job_detail/yyy" },
+            { job_name: "Rust系统专家", company: "自动驾驶独角兽", salary: "40-70K·15薪", skills: "Rust;系统编程;中间件", job_degree: "本科", job_experience: "5-10年", city_name: "北京", link: "" },
+            { job_name: "高级后端开发(Rust)", company: "字节跳动", salary: "35-65K", skills: "Rust;后端;分布式", job_degree: "本科", job_experience: "1-3年", city_name: "北京", link: "https://www.zhipin.com/job_detail/zzz" }
+        ];
+    </script>
+</body>
+
+</html>

@@ -8,6 +8,7 @@ blob-report/
 
 # Outputs
 *.csv
+report.html
 
 # State files
 storage_state.json
@@ -19,6 +20,7 @@ progress_state.json
 # Editor
 .vscode/
 .idea/
+AGENTS.md
 
 # OS
 .DS_Store

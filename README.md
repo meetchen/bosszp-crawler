@@ -27,14 +27,16 @@ getJD 是一个面向个人学习/求职调研的职位数据工具链，覆盖�
 抓取快速开始
 ------------
 - 最小示例：
-  `python boss_crawler.py --query 数据分析`
+  `python boss_crawler.py --queries 数据分析`
 - 指定城市（城市名或代码，逗号分隔）：
-  `python boss_crawler.py --query aiinfra --cities 北京,杭州`
+  `python boss_crawler.py --queries aiinfra --cities 北京,杭州`
 - 只抓列表（更快、风控更低）：
-  `python boss_crawler.py --query aiinfra --pages 1 --skip-detail`
+  `python boss_crawler.py --queries aiinfra --pages 1 --skip-detail`
+- 去重写入并在连续两页无新增时停止当前城市：
+  `python boss_crawler.py --queries aiinfra --cities 北京,杭州 --dedupe-on-the-fly --pages 10`
 - 保存登录态再复用（推荐）：
-  `python boss_crawler.py --query aiinfra --auto-login --wait-secs 60 --save-state storage_state.json`
-  `python boss_crawler.py --query aiinfra --storage-state storage_state.json --pages 2`
+  `python boss_crawler.py --queries aiinfra --auto-login --wait-secs 60 --save-state storage_state.json`
+  `python boss_crawler.py --queries aiinfra --storage-state storage_state.json --pages 2`
 
 看板使用
 --------
@@ -46,17 +48,19 @@ getJD 是一个面向个人学习/求职调研的职位数据工具链，覆盖�
 主要参数
 --------
 查询与范围
-- `--query` / `--queries`：关键词（`--queries` 支持逗号分隔，优先级更高）。
-- `--city` / `--cities`：城市名或代码（逗号分隔，优先级更高）。
+- `-q` / `--queries`：关键词（支持逗号分隔）。
+ - `-c` / `--cities`：城市名或代码（逗号分隔；不传则默认全国）。
 - `--nationwide`：全国抓取（忽略城市参数）。
-- `--pages`：页数（0 表示不限，直到连续空页停止）。
+- `-p` / `--pages`：页数（0 表示不限，直到连续空页停止）。
 - `--empty-stop`：连续空页阈值（仅在 `--pages=0` 时生效）。
+- `--dedupe-on-the-fly`：写入 CSV 时去重，并在连续两页无新增时停止当前关键词+城市的分页；会逐条打印重复跳过日志。
 
 输出与续抓
 - `--out`：CSV 输出路径（默认按关键词/城市命名）。
 - `--overwrite`：覆盖写入（默认追加）。
 - `--resume`：继续上次进度（需配合 `--progress-file`）。
 - `--progress-file`：进度文件路径（JSON）。
+说明：默认输出 CSV 写入 `data/`，运行日志写入 `log/`。
 
 浏览器与登录
 - `--headless`：无界面模式（默认有界面）。

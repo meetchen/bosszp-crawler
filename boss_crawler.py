@@ -8,7 +8,7 @@ import signal
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, List, Optional
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse, parse_qsl
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError, Error
 
@@ -36,6 +36,9 @@ USER_AGENTS = [
 ]
 
 PAUSE_REQUESTED = False
+LOG_FILE_HANDLE = None
+LOG_DIR = Path("log")
+DATA_DIR = Path("data")
 
 
 @dataclass
@@ -76,28 +79,30 @@ class JobItem:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Boss直聘职位爬虫（Playwright）")
-    parser.add_argument("--query", default="", help="岗位关键词，例如：数据分析")
     parser.add_argument(
+        "-q",
         "--queries",
         default="",
-        help="多个关键词，逗号分隔（优先于 --query）",
+        help="多个关键词，逗号分隔",
     )
     parser.add_argument(
-        "--city",
-        default="",
-        help="城市代码或名称（如 北京/上海），默认使用预置城市列表",
-    )
-    parser.add_argument(
+        "-c",
         "--cities",
         default="",
-        help="多个城市代码或名称，逗号分隔（优先于 --city），默认北京/上海/杭州/苏州/深圳/广州/西安",
+        help="多个城市代码或名称，逗号分隔，默认北京/上海/杭州/苏州/深圳/广州/西安",
     )
     parser.add_argument(
         "--nationwide",
         action="store_true",
         help="全国范围抓取（不传 city 参数）",
     )
-    parser.add_argument("--pages", type=int, default=30, help="抓取页数（0 表示不限，直到空页停止）")
+    parser.add_argument(
+        "-p",
+        "--pages",
+        type=int,
+        default=30,
+        help="抓取页数（0 表示不限，直到空页停止）",
+    )
     parser.add_argument("--out", default="", help="CSV 输出路径（默认按关键词/城市命名）")
     parser.add_argument(
         "--overwrite",
@@ -140,6 +145,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=8.0,
         help="页面/详情访问间隔的随机等待最大秒数（降低风控）",
+    )
+    parser.add_argument(
+        "--dedupe-on-the-fly",
+        action="store_true",
+        help="写入 CSV 时去重；若连续两页无新增则停止当前查询",
     )
     parser.add_argument(
         "--max-retries",
@@ -330,6 +340,151 @@ async def scrape_detail(
         await detail_page.close()
 
 
+async def process_job_list_items(
+    job_list: list,
+    context: BrowserContext,
+    skip_detail: bool,
+    visit_sleep_min: float,
+    visit_sleep_max: float,
+    on_item,
+    dedupe_keys: Optional[set[str]] = None,
+    dedupe_log: bool = False,
+) -> tuple[List[JobItem], int]:
+    items: List[JobItem] = []
+    dup_skipped = 0
+    for item in job_list:
+        title = (item.get("jobName") or item.get("positionName") or "").strip()
+        salary = (item.get("salaryDesc") or item.get("salary") or "").strip()
+        location = build_location(item)
+        if is_intern_role(title):
+            continue
+        company = (
+            item.get("brandName")
+            or item.get("companyName")
+            or item.get("brand")
+            or item.get("company")
+            or ""
+        ).strip()
+
+        encrypt_job_id = item.get("encryptJobId") or item.get("encryptId") or item.get("jobEncryptId")
+        security_id = item.get("securityId") or ""
+        link = ""
+        if encrypt_job_id and security_id:
+            link = f"{BASE_URL}/job_detail/{encrypt_job_id}.html?securityId={security_id}"
+        elif encrypt_job_id:
+            link = f"{BASE_URL}/job_detail/{encrypt_job_id}.html"
+        if dedupe_keys is not None:
+            key = build_item_key_from_fields(company, title, location, str(encrypt_job_id or ""), link)
+            if key in dedupe_keys:
+                dup_skipped += 1
+                if dedupe_log:
+                    log(f"[dedupe] skip {company} | {title} | {location}")
+                continue
+            dedupe_keys.add(key)
+
+        description = (item.get("jobDesc") or item.get("jobDescription") or "").strip()
+        if link and not skip_detail and not description:
+            if should_pause_after_item():
+                return items, dup_skipped
+            description = await scrape_detail(context, link, visit_sleep_min, visit_sleep_max)
+
+        items.append(
+            JobItem(
+                company=company,
+                title=title,
+                salary=salary,
+                location=location,
+                description=description,
+                link=link,
+                raw_item=json.dumps(item, ensure_ascii=False),
+                security_id=list_to_str(security_id),
+                encrypt_job_id=list_to_str(encrypt_job_id),
+                encrypt_brand_id=list_to_str(item.get("encryptBrandId")),
+                lid=list_to_str(item.get("lid")),
+                boss_name=list_to_str(item.get("bossName")),
+                boss_title=list_to_str(item.get("bossTitle")),
+                boss_online=list_to_str(item.get("bossOnline")),
+                boss_cert=list_to_str(item.get("bossCert")),
+                gold_hunter=list_to_str(item.get("goldHunter")),
+                brand_name=list_to_str(item.get("brandName")),
+                brand_stage_name=list_to_str(item.get("brandStageName")),
+                brand_industry=list_to_str(item.get("brandIndustry")),
+                brand_scale_name=list_to_str(item.get("brandScaleName")),
+                job_name=list_to_str(item.get("jobName") or item.get("positionName")),
+                salary_desc=list_to_str(item.get("salaryDesc") or item.get("salary")),
+                job_labels=list_to_str(item.get("jobLabels") or item.get("jobLabel")),
+                skills=list_to_str(item.get("skills")),
+                job_experience=list_to_str(item.get("jobExperience")),
+                job_degree=list_to_str(item.get("jobDegree")),
+                city_name=list_to_str(item.get("cityName") or item.get("jobCity") or item.get("city")),
+                area_district=list_to_str(
+                    item.get("areaDistrict")
+                    or item.get("jobAreaDistrict")
+                    or item.get("jobArea")
+                    or item.get("area")
+                ),
+                business_district=list_to_str(
+                    item.get("businessDistrict")
+                    or item.get("jobAreaBusiness")
+                    or item.get("business")
+                ),
+                welfare_list=list_to_str(item.get("welfareList")),
+                job_valid_status=list_to_str(item.get("jobValidStatus")),
+                job_type=list_to_str(item.get("jobType")),
+            )
+        )
+        if on_item:
+            on_item(items[-1])
+        if items[-1].company or items[-1].title:
+            log(format_item_log(items[-1]))
+        if should_pause_after_item():
+            return items, dup_skipped
+
+    return items, dup_skipped
+
+
+async def fetch_joblist_api(
+    context: BrowserContext,
+    template: dict,
+    page_num: int,
+    skip_detail: bool,
+    visit_sleep_min: float,
+    visit_sleep_max: float,
+    on_item,
+    dedupe_keys: Optional[set[str]] = None,
+    dedupe_log: bool = False,
+) -> tuple[List[JobItem], int]:
+    url = template.get("url", "")
+    if not url:
+        return [], 0
+    payload = update_page_payload(template.get("payload", {}), page_num)
+    headers = template.get("headers", {})
+    kind = template.get("kind", "form")
+    if kind == "json":
+        resp = await context.request.post(url, headers=headers, json=payload)
+    else:
+        resp = await context.request.post(url, headers=headers, data=payload)
+    if resp.status != 200:
+        return [], 0
+    try:
+        data = await resp.json()
+    except Exception:
+        return [], 0
+    job_list = extract_job_list(data)
+    if not job_list:
+        return [], 0
+    return await process_job_list_items(
+        job_list,
+        context,
+        skip_detail,
+        visit_sleep_min,
+        visit_sleep_max,
+        on_item,
+        dedupe_keys,
+        dedupe_log,
+    )
+
+
 async def scrape_list_page(
     context: BrowserContext,
     query: str,
@@ -341,14 +496,21 @@ async def scrape_list_page(
     visit_sleep_min: float,
     visit_sleep_max: float,
     on_item,
-) -> List[JobItem]:
+    page: Optional[Page] = None,
+    dedupe_keys: Optional[set[str]] = None,
+    dedupe_log: bool = False,
+    template_holder: Optional[dict] = None,
+) -> tuple[List[JobItem], int]:
     if city:
         url = f"{BASE_URL}/web/geek/job?query={quote_plus(query)}&city={city}&page={page_num}"
     else:
         url = f"{BASE_URL}/web/geek/job?query={quote_plus(query)}&page={page_num}"
-    page: Page = await context.new_page()
+    owns_page = page is None
+    page = page or await context.new_page()
 
     job_list_future: asyncio.Future = asyncio.get_event_loop().create_future()
+    joblist_request_info: dict = {}
+    joblist_request_info: dict = {}
 
     async def maybe_capture_joblist(resp) -> None:
         if job_list_future.done():
@@ -380,7 +542,18 @@ async def scrape_list_page(
     def handle_response(resp) -> None:
         asyncio.create_task(maybe_capture_joblist(resp))
 
+    def handle_request(req) -> None:
+        if "joblist.json" not in req.url:
+            return
+        try:
+            joblist_request_info["url"] = req.url
+            joblist_request_info["headers"] = req.headers
+            joblist_request_info["post_data"] = req.post_data or ""
+        except Exception:
+            pass
+
     page.on("response", handle_response)
+    page.on("request", handle_request)
     try:
         log(f"[open] list {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -404,140 +577,30 @@ async def scrape_list_page(
                 html_path.write_text(html, encoding="utf-8")
                 await page.screenshot(path=str(png_path), full_page=True)
                 print(f"[debug] 已保存 HTML: {html_path}，截图: {png_path}")
-            return []
+            return [], 0
         await page.wait_for_timeout(randomized_timeout_ms(800, 1200))
 
         items: List[JobItem] = []
+        dup_skipped = 0
         try:
             job_list = await asyncio.wait_for(job_list_future, timeout=4)
         except asyncio.TimeoutError:
             job_list = None
 
         if job_list:
-            for item in job_list:
-                title = (item.get("jobName") or item.get("positionName") or "").strip()
-                salary = (item.get("salaryDesc") or item.get("salary") or "").strip()
-                location = build_location(item)
-                if is_intern_role(title):
-                    continue
-                company = (
-                    item.get("brandName")
-                    or item.get("companyName")
-                    or item.get("brand")
-                    or item.get("company")
-                    or ""
-                ).strip()
-
-                encrypt_job_id = item.get("encryptJobId") or item.get("encryptId") or item.get("jobEncryptId")
-                security_id = item.get("securityId") or ""
-                link = ""
-                if encrypt_job_id and security_id:
-                    link = f"{BASE_URL}/job_detail/{encrypt_job_id}.html?securityId={security_id}"
-                elif encrypt_job_id:
-                    link = f"{BASE_URL}/job_detail/{encrypt_job_id}.html"
-
-                description = (item.get("jobDesc") or item.get("jobDescription") or "").strip()
-                if link and not skip_detail and not description:
-                    if should_pause_after_item():
-                        items.append(
-                            JobItem(
-                                company=company,
-                                title=title,
-                                salary=salary,
-                                location=location,
-                                description=description,
-                                link=link,
-                                raw_item=json.dumps(item, ensure_ascii=False),
-                                security_id=list_to_str(security_id),
-                                encrypt_job_id=list_to_str(encrypt_job_id),
-                                encrypt_brand_id=list_to_str(item.get("encryptBrandId")),
-                                lid=list_to_str(item.get("lid")),
-                                boss_name=list_to_str(item.get("bossName")),
-                                boss_title=list_to_str(item.get("bossTitle")),
-                                boss_online=list_to_str(item.get("bossOnline")),
-                                boss_cert=list_to_str(item.get("bossCert")),
-                                gold_hunter=list_to_str(item.get("goldHunter")),
-                                brand_name=list_to_str(item.get("brandName")),
-                                brand_stage_name=list_to_str(item.get("brandStageName")),
-                                brand_industry=list_to_str(item.get("brandIndustry")),
-                                brand_scale_name=list_to_str(item.get("brandScaleName")),
-                                job_name=list_to_str(item.get("jobName") or item.get("positionName")),
-                                salary_desc=list_to_str(item.get("salaryDesc") or item.get("salary")),
-                                job_labels=list_to_str(item.get("jobLabels") or item.get("jobLabel")),
-                                skills=list_to_str(item.get("skills")),
-                                job_experience=list_to_str(item.get("jobExperience")),
-                                job_degree=list_to_str(item.get("jobDegree")),
-                                city_name=list_to_str(item.get("cityName") or item.get("jobCity") or item.get("city")),
-                                area_district=list_to_str(
-                                    item.get("areaDistrict")
-                                    or item.get("jobAreaDistrict")
-                                    or item.get("jobArea")
-                                    or item.get("area")
-                                ),
-                                business_district=list_to_str(
-                                    item.get("businessDistrict")
-                                    or item.get("jobAreaBusiness")
-                                    or item.get("business")
-                                ),
-                                welfare_list=list_to_str(item.get("welfareList")),
-                                job_valid_status=list_to_str(item.get("jobValidStatus")),
-                                job_type=list_to_str(item.get("jobType")),
-                            )
-                        )
-                        if on_item:
-                            on_item(items[-1])
-                        if items[-1].company or items[-1].title:
-                            log(format_item_log(items[-1]))
-                        return items
-                    description = await scrape_detail(context, link, visit_sleep_min, visit_sleep_max)
-
-                items.append(
-                    JobItem(
-                        company=company,
-                        title=title,
-                        salary=salary,
-                        location=location,
-                        description=description,
-                        link=link,
-                        raw_item=json.dumps(item, ensure_ascii=False),
-                        security_id=list_to_str(security_id),
-                        encrypt_job_id=list_to_str(encrypt_job_id),
-                        encrypt_brand_id=list_to_str(item.get("encryptBrandId")),
-                        lid=list_to_str(item.get("lid")),
-                        boss_name=list_to_str(item.get("bossName")),
-                        boss_title=list_to_str(item.get("bossTitle")),
-                        boss_online=list_to_str(item.get("bossOnline")),
-                        boss_cert=list_to_str(item.get("bossCert")),
-                        gold_hunter=list_to_str(item.get("goldHunter")),
-                        brand_name=list_to_str(item.get("brandName")),
-                        brand_stage_name=list_to_str(item.get("brandStageName")),
-                        brand_industry=list_to_str(item.get("brandIndustry")),
-                        brand_scale_name=list_to_str(item.get("brandScaleName")),
-                        job_name=list_to_str(item.get("jobName") or item.get("positionName")),
-                        salary_desc=list_to_str(item.get("salaryDesc") or item.get("salary")),
-                        job_labels=list_to_str(item.get("jobLabels") or item.get("jobLabel")),
-                        skills=list_to_str(item.get("skills")),
-                        job_experience=list_to_str(item.get("jobExperience")),
-                        job_degree=list_to_str(item.get("jobDegree")),
-                        city_name=list_to_str(item.get("cityName") or item.get("jobCity") or item.get("city")),
-                        area_district=list_to_str(item.get("areaDistrict") or item.get("jobAreaDistrict") or item.get("jobArea") or item.get("area")),
-                        business_district=list_to_str(
-                            item.get("businessDistrict")
-                            or item.get("jobAreaBusiness")
-                            or item.get("business")
-                        ),
-                        welfare_list=list_to_str(item.get("welfareList")),
-                        job_valid_status=list_to_str(item.get("jobValidStatus")),
-                        job_type=list_to_str(item.get("jobType")),
-                    )
-                )
-                if on_item:
-                    on_item(items[-1])
-                if items[-1].company or items[-1].title:
-                    log(format_item_log(items[-1]))
-                if should_pause_after_item():
-                    return items
-            return items
+            items, dup_skipped = await process_job_list_items(
+                job_list,
+                context,
+                skip_detail,
+                visit_sleep_min,
+                visit_sleep_max,
+                on_item,
+                dedupe_keys,
+                dedupe_log,
+            )
+            if template_holder is not None and joblist_request_info and not template_holder:
+                template_holder.update(build_joblist_template(joblist_request_info))
+            return items, dup_skipped
 
         cards = await page.query_selector_all(".job-card-wrapper, .search-job-card, .job-card-box")
         for card in cards:
@@ -555,6 +618,14 @@ async def scrape_list_page(
             link_node = await card.query_selector("a.job-name") or await card.query_selector("a")
             href = await link_node.get_attribute("href") if link_node else ""
             link = urljoin(BASE_URL, href) if href else ""
+            if dedupe_keys is not None:
+                key = build_item_key_from_fields(company, title, location, "", link)
+                if key in dedupe_keys:
+                    dup_skipped += 1
+                    if dedupe_log:
+                        log(f"[dedupe] skip {company} | {title} | {location}")
+                    continue
+                dedupe_keys.add(key)
 
             description = ""
             if link and not skip_detail:
@@ -584,7 +655,7 @@ async def scrape_list_page(
                         on_item(items[-1])
                     if items[-1].company or items[-1].title:
                         log(format_item_log(items[-1]))
-                    return items
+                    return items, dup_skipped
                 description = await scrape_detail(context, link, visit_sleep_min, visit_sleep_max)
 
             items.append(
@@ -613,18 +684,24 @@ async def scrape_list_page(
             if items[-1].company or items[-1].title:
                 log(format_item_log(items[-1]))
             if should_pause_after_item():
-                return items
+                return items, dup_skipped
 
             await page.wait_for_timeout(randomized_timeout_ms(300, 500))
 
-        return items
+        if template_holder is not None and joblist_request_info and not template_holder:
+            template_holder.update(build_joblist_template(joblist_request_info))
+        return items, dup_skipped
     finally:
         try:
             page.remove_listener("response", handle_response)
         except Exception:
             pass
         try:
-            if not page.is_closed():
+            page.remove_listener("request", handle_request)
+        except Exception:
+            pass
+        try:
+            if owns_page and not page.is_closed():
                 await page.close()
         except Exception:
             pass
@@ -643,7 +720,15 @@ def build_context_kwargs(storage_state: str) -> dict:
 
 def log(message: str) -> None:
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {message}", flush=True)
+    safe_message = clean_text(message)
+    line = f"[{now}] {safe_message}"
+    print(line, flush=True)
+    if LOG_FILE_HANDLE:
+        try:
+            LOG_FILE_HANDLE.write(line + "\n")
+            LOG_FILE_HANDLE.flush()
+        except Exception:
+            pass
 
 
 def handle_sigint(signum, frame) -> None:
@@ -682,7 +767,8 @@ def save_progress(progress_file: str, progress: dict) -> None:
 
 def parse_csv_list(value: str) -> List[str]:
     normalized = (
-        value.replace("，", ",")
+        clean_text(value)
+        .replace("，", ",")
         .replace("、", ",")
         .replace("[", "")
         .replace("]", "")
@@ -693,12 +779,86 @@ def parse_csv_list(value: str) -> List[str]:
     )
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
+
+def clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    text = text.encode("utf-8", "replace").decode("utf-8")
+    return "".join(ch for ch in text if ch.isprintable() or ch in "\t ")
+
 def list_to_str(value: object) -> str:
     if isinstance(value, list):
         return ";".join(str(item).strip() for item in value if str(item).strip())
     if value is None:
         return ""
     return str(value).strip()
+
+
+def build_item_key(item: JobItem) -> str:
+    if item.encrypt_job_id:
+        return f"job:{item.encrypt_job_id}"
+    if item.link:
+        return f"link:{item.link}"
+    city = item.city_name or item.location
+    return f"fallback:{item.company}|{item.title}|{city}"
+
+
+def build_item_key_from_fields(
+    company: str,
+    title: str,
+    city: str,
+    encrypt_job_id: str,
+    link: str,
+) -> str:
+    if encrypt_job_id:
+        return f"job:{encrypt_job_id}"
+    if link:
+        return f"link:{link}"
+    return f"fallback:{company}|{title}|{city}"
+
+
+def normalize_headers(headers: dict) -> dict:
+    cleaned = {}
+    for key, value in headers.items():
+        key_lower = key.lower()
+        if key_lower in {"content-length", "host", "cookie"}:
+            continue
+        cleaned[key_lower] = value
+    return cleaned
+
+
+def parse_post_data(post_data: str) -> tuple[str, dict]:
+    if not post_data:
+        return "form", {}
+    try:
+        parsed = json.loads(post_data)
+        if isinstance(parsed, dict):
+            return "json", parsed
+    except Exception:
+        pass
+    payload = {k: v for k, v in parse_qsl(post_data, keep_blank_values=True)}
+    return "form", payload
+
+
+def update_page_payload(payload: dict, page_num: int) -> dict:
+    updated = dict(payload)
+    for key in ("page", "pageNum", "pageNo", "pageIndex"):
+        if key in updated:
+            updated[key] = str(page_num)
+            return updated
+    updated["page"] = str(page_num)
+    return updated
+
+
+def build_joblist_template(request_info: dict) -> dict:
+    kind, payload = parse_post_data(request_info.get("post_data", ""))
+    return {
+        "url": request_info.get("url", ""),
+        "headers": normalize_headers(request_info.get("headers", {})),
+        "kind": kind,
+        "payload": payload,
+    }
 
 
 def get_city_map() -> dict[str, str]:
@@ -738,7 +898,7 @@ def sanitize_filename(value: str) -> str:
 
 
 def resolve_city(value: str) -> str:
-    city = value.strip()
+    city = clean_text(value).strip()
     if not city:
         return city
     return get_city_map().get(city, city)
@@ -786,7 +946,6 @@ def open_csv_writer(out_path: Path, overwrite: bool) -> tuple[csv.DictWriter, ob
             "location",
             "description",
             "link",
-            "raw_item",
             "security_id",
             "encrypt_job_id",
             "encrypt_brand_id",
@@ -812,6 +971,7 @@ def open_csv_writer(out_path: Path, overwrite: bool) -> tuple[csv.DictWriter, ob
             "welfare_list",
             "job_valid_status",
             "job_type",
+            "raw_item",
         ],
     )
     if write_header:
@@ -867,6 +1027,7 @@ async def run(
     save_state: str,
     channel: str,
     overwrite: bool,
+    dedupe_on_the_fly: bool,
     page_sleep_min: float,
     page_sleep_max: float,
     cycles: int,
@@ -881,6 +1042,7 @@ async def run(
     resume: bool,
     progress_file: str,
 ) -> None:
+    effective_storage_state = storage_state or save_state
     async with async_playwright() as p:
         browser: Browser = await p.chromium.launch(
             headless=not headful,
@@ -891,7 +1053,9 @@ async def run(
             handle_sighup=False,
             channel=channel or None,
         )
-        context: BrowserContext = await browser.new_context(**build_context_kwargs(storage_state))
+        context: BrowserContext = await browser.new_context(
+            **build_context_kwargs(effective_storage_state)
+        )
 
         writer, file_handle = open_csv_writer(out_path, overwrite)
         total_written = 0
@@ -905,7 +1069,8 @@ async def run(
             max_consecutive_errors = 1
 
         async def prompt_input(message: str) -> str:
-            return (await asyncio.to_thread(input, message)).strip()
+            raw = await asyncio.to_thread(input, message)
+            return clean_text(raw).strip()
 
         async def maybe_pause() -> str:
             nonlocal pages, queries, cities
@@ -963,7 +1128,9 @@ async def run(
                 await context.close()
             except Exception:
                 pass
-            context = await browser.new_context(**build_context_kwargs(storage_state))
+            context = await browser.new_context(
+                **build_context_kwargs(effective_storage_state)
+            )
 
         progress = load_progress(progress_file) if resume else None
         start_cycle_index = 0
@@ -997,6 +1164,7 @@ async def run(
         try:
             cycle_index = start_cycle_index
             consecutive_errors = 0
+            joblist_templates: dict[tuple[str, str], dict] = {}
             while loop or cycle_index < cycles:
                 query_index = 0
                 if resume and cycle_index == start_cycle_index:
@@ -1010,6 +1178,7 @@ async def run(
                     while city_index < len(cities):
                         city = cities[city_index]
                         page_num = 1
+                        list_page: Optional[Page] = None
                         if (
                             resume
                             and cycle_index == start_cycle_index
@@ -1018,77 +1187,158 @@ async def run(
                         ):
                             page_num = start_page_num
                         empty_pages = 0
-                        while True:
-                            if pages > 0 and page_num > pages:
-                                break
-                            city_label = city_to_label(city)
-                            log(f"Scraping {query} | {city_label} | page {page_num} ...")
-                            def handle_item(item: JobItem) -> None:
-                                nonlocal total_written
-                                writer.writerow(asdict(item))
-                                file_handle.flush()
-                                total_written += 1
-                            attempt = 0
-                            items: List[JobItem] = []
+                        no_new_pages = 0
+                        seen_keys = set()
+                        try:
                             while True:
-                                try:
-                                    items = await scrape_list_page(
-                                        context,
-                                        query,
-                                        city,
-                                        page_num,
-                                        skip_detail,
-                                        debug_dump,
-                                        wait_secs,
-                                        page_sleep_min,
-                                        page_sleep_max,
-                                        handle_item,
+                                if pages > 0 and page_num > pages:
+                                    break
+                                city_label = city_to_label(city)
+                                log(f"Scraping {query} | {city_label} | page {page_num} ...")
+                                new_written = 0
+                                dup_skipped = 0
+                                template_key = (query, city)
+                                use_api = page_num > 1 and template_key in joblist_templates
+                                if use_api:
+                                    prev_page = list_page
+                                    list_page = await context.new_page()
+                                    if prev_page:
+                                        try:
+                                            if not prev_page.is_closed():
+                                                await prev_page.close()
+                                        except Exception:
+                                            pass
+                                    list_url = (
+                                        f"{BASE_URL}/web/geek/job?query={quote_plus(query)}&city={city}&page={page_num}"
+                                        if city
+                                        else f"{BASE_URL}/web/geek/job?query={quote_plus(query)}&page={page_num}"
                                     )
-                                    consecutive_errors = 0
-                                    break
-                                except (TimeoutError, Error, asyncio.TimeoutError) as exc:
-                                    attempt += 1
-                                    consecutive_errors += 1
-                                    log(f"[warn] 抓取失败，{exc}（{attempt}/{max_retries}）")
-                                except Exception as exc:
-                                    attempt += 1
-                                    consecutive_errors += 1
-                                    log(f"[warn] 抓取异常，{exc}（{attempt}/{max_retries}）")
-                                if attempt > max_retries:
-                                    log("[warn] 超过最大重试次数，跳过该页")
-                                    break
-                                if consecutive_errors >= max_consecutive_errors:
-                                    await reset_context("连续失败次数过多")
-                                    consecutive_errors = 0
-                                await randomized_sleep(retry_sleep_min, retry_sleep_max)
-                            log(f"[page] {query} | {city_label} | page {page_num} -> {len(items)} items")
-                            save_progress(
-                                progress_file,
-                                {
-                                    "query": query,
-                                    "city": city,
-                                    "page": page_num + 1,
-                                    "cycle_index": cycle_index,
-                                },
-                            )
-                            if not items:
-                                empty_pages += 1
-                                log(
-                                    f"[warn] empty page {page_num} ({empty_pages}/{empty_stop})"
+                                    try:
+                                        await list_page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
+                                    except Exception:
+                                        pass
+                                def handle_item(item: JobItem) -> None:
+                                    nonlocal total_written, new_written
+                                    writer.writerow(asdict(item))
+                                    file_handle.flush()
+                                    total_written += 1
+                                    new_written += 1
+                                attempt = 0
+                                items: List[JobItem] = []
+                                while True:
+                                    try:
+                                        if use_api:
+                                            items, dup_skipped = await fetch_joblist_api(
+                                                context,
+                                                joblist_templates[template_key],
+                                                page_num,
+                                                skip_detail,
+                                                page_sleep_min,
+                                                page_sleep_max,
+                                                handle_item,
+                                                seen_keys if dedupe_on_the_fly else None,
+                                                dedupe_on_the_fly,
+                                            )
+                                        else:
+                                            prev_page = list_page
+                                            list_page = await context.new_page()
+                                            if prev_page:
+                                                try:
+                                                    if not prev_page.is_closed():
+                                                        await prev_page.close()
+                                                except Exception:
+                                                    pass
+                                            template_holder: dict = {}
+                                            items, dup_skipped = await scrape_list_page(
+                                                context,
+                                                query,
+                                                city,
+                                                page_num,
+                                                skip_detail,
+                                                debug_dump,
+                                                wait_secs,
+                                                page_sleep_min,
+                                                page_sleep_max,
+                                                handle_item,
+                                                list_page,
+                                                seen_keys if dedupe_on_the_fly else None,
+                                                dedupe_on_the_fly,
+                                                template_holder,
+                                            )
+                                            if template_holder:
+                                                joblist_templates[template_key] = template_holder
+                                        consecutive_errors = 0
+                                        break
+                                    except (TimeoutError, Error, asyncio.TimeoutError) as exc:
+                                        attempt += 1
+                                        consecutive_errors += 1
+                                        log(f"[warn] 抓取失败，{exc}（{attempt}/{max_retries}）")
+                                    except Exception as exc:
+                                        attempt += 1
+                                        consecutive_errors += 1
+                                        log(f"[warn] 抓取异常，{exc}（{attempt}/{max_retries}）")
+                                    if attempt > max_retries:
+                                        log("[warn] 超过最大重试次数，跳过该页")
+                                        break
+                                    if consecutive_errors >= max_consecutive_errors:
+                                        await reset_context("连续失败次数过多")
+                                        consecutive_errors = 0
+                                        try:
+                                            if list_page and not list_page.is_closed():
+                                                await list_page.close()
+                                        except Exception:
+                                            pass
+                                        list_page = None
+                                    await randomized_sleep(retry_sleep_min, retry_sleep_max)
+                                if dedupe_on_the_fly:
+                                    log(
+                                        f"[page] {query} | {city_label} | page {page_num} -> "
+                                        f"{len(items)} items ({new_written} new, {dup_skipped} dup)"
+                                    )
+                                else:
+                                    log(f"[page] {query} | {city_label} | page {page_num} -> {len(items)} items")
+                                save_progress(
+                                    progress_file,
+                                    {
+                                        "query": query,
+                                        "city": city,
+                                        "page": page_num + 1,
+                                        "cycle_index": cycle_index,
+                                    },
                                 )
-                            else:
-                                empty_pages = 0
-                            if pages == 0 and empty_pages >= empty_stop:
-                                log(f"[stop] reached {empty_stop} consecutive empty pages")
-                                break
-                            page_num += 1
-                            pause_action = await maybe_pause()
-                            if pause_action == "stop":
-                                return
-                            if pause_action == "restart":
-                                restart_all = True
-                                break
-                            await randomized_sleep(page_sleep_min, page_sleep_max)
+                                if not items:
+                                    empty_pages += 1
+                                    log(
+                                        f"[warn] empty page {page_num} ({empty_pages}/{empty_stop})"
+                                    )
+                                else:
+                                    empty_pages = 0
+                                if dedupe_on_the_fly:
+                                    if new_written == 0:
+                                        no_new_pages += 1
+                                        log(f"[warn] no new items page {page_num} ({no_new_pages}/2)")
+                                    else:
+                                        no_new_pages = 0
+                                    if no_new_pages >= 2:
+                                        log("[stop] no new items for 2 consecutive pages")
+                                        break
+                                if pages == 0 and empty_pages >= empty_stop:
+                                    log(f"[stop] reached {empty_stop} consecutive empty pages")
+                                    break
+                                page_num += 1
+                                pause_action = await maybe_pause()
+                                if pause_action == "stop":
+                                    return
+                                if pause_action == "restart":
+                                    restart_all = True
+                                    break
+                                await randomized_sleep(page_sleep_min, page_sleep_max)
+                        finally:
+                            try:
+                                if list_page and not list_page.is_closed():
+                                    await list_page.close()
+                            except Exception:
+                                pass
                         resume = False
                         if restart_all:
                             break
@@ -1115,6 +1365,7 @@ async def run(
 
 
 def main() -> None:
+    global LOG_FILE_HANDLE
     signal.signal(signal.SIGINT, handle_sigint)
     args = parse_args()
     if args.headful and args.headless:
@@ -1127,20 +1378,23 @@ def main() -> None:
         headful = True
     storage_state = args.storage_state
     save_state = args.save_state
+    if save_state and not storage_state:
+        storage_state = save_state
 
-    queries = parse_csv_list(args.queries) if args.queries else ([args.query] if args.query else [])
+    queries = parse_csv_list(args.queries) if args.queries else []
     if args.nationwide:
         cities = [""]
     else:
         if args.cities:
             cities = resolve_cities(parse_csv_list(args.cities))
-        elif args.city:
-            cities = [resolve_city(args.city)]
         else:
-            cities = DEFAULT_CITIES[:]
+            cities = [""]
     if not queries:
-        raise SystemExit("必须提供 --query 或 --queries")
-    out_path = Path(args.out) if args.out else build_default_out(queries, cities)
+        raise SystemExit("必须提供 --queries")
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        out_path = DATA_DIR / build_default_out(queries, cities)
     if args.skip_detail:
         skip_detail = True
     else:
@@ -1153,6 +1407,12 @@ def main() -> None:
             bootstrap_login(queries[0], cities[0], args.wait_secs, save_state, args.channel)
         )
         storage_state = save_state
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        LOG_FILE_HANDLE = (LOG_DIR / f"run_{timestamp}.log").open("a", encoding="utf-8")
+    except Exception:
+        LOG_FILE_HANDLE = None
     asyncio.run(
         run(
             queries,
@@ -1167,6 +1427,7 @@ def main() -> None:
             save_state,
             args.channel,
             args.overwrite,
+            args.dedupe_on_the_fly,
             args.page_sleep_min,
             args.page_sleep_max,
             max(1, args.cycles),
@@ -1182,6 +1443,11 @@ def main() -> None:
             args.progress_file,
         )
     )
+    if LOG_FILE_HANDLE:
+        try:
+            LOG_FILE_HANDLE.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

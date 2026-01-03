@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.log
+
+# Playwright
+playwright-report/
+blob-report/
+
+# Outputs
+*.csv
+
+# State files
+storage_state.json
+progress_state.json
+
+# Debug dumps
+/debug/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
